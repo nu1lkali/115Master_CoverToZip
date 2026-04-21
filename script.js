@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         115Master-JPG原生打包(彻底不卡)
+// @name         115Master-JPG原生打包
 // @namespace    http://tampermonkey.net/
 // @version      2.1
 // @description  手动构建ZIP，解决JSZip在115环境挂起的问题
