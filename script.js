@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         115Master-封面采集打包
+// @name         115Master-跨页采集打包(重名提醒)
 // @namespace    http://tampermonkey.net/
-// @version      3.2
-// @description  将弹窗提示改为自动消失的 Toast，支持流畅跨页采集
+// @version      3.4
+// @description  去掉编号还原原名，发现重名时在提示框和控制台告知
 // @author       Gemini
 // @match        *://115.com/*
 // @grant        none
@@ -11,14 +11,15 @@
 (function() {
     'use strict';
 
-    let imageManifest = [];
+    // 全局存储清单
+    let imageManifest = {};
+
     const CONTAINER_ID = '115master-tools-container';
 
-    // --- 1. 新增：自动消失的提示函数 ---
-    function showToast(message, type = 'success') {
+    // --- 1. Toast 提示函数 ---
+    function showToast(message, type = 'success', duration = 2000) {
         const toastId = '115master-toast';
         let toast = document.getElementById(toastId);
-        
         if (!toast) {
             toast = document.createElement('div');
             toast.id = toastId;
@@ -31,27 +32,22 @@
             `;
             document.body.appendChild(toast);
         }
-
-        // 根据类型设置背景色
-        toast.style.backgroundColor = type === 'success' ? '#4caf50' : '#f44336';
+        toast.style.backgroundColor = type === 'success' ? '#4caf50' : (type === 'warn' ? '#ff9800' : '#f44336');
         toast.innerText = message;
-        
-        // 显示动画
         toast.style.transform = 'translateY(0)';
         toast.style.opacity = '1';
-
-        // 2秒后消失
         setTimeout(() => {
             toast.style.transform = 'translateY(-20px)';
             toast.style.opacity = '0';
-        }, 2000);
+        }, duration);
     }
 
     // --- 2. 注入 UI 界面 ---
     function injectUI() {
+        const manifestLen = Object.keys(imageManifest).length;
         if (document.getElementById(CONTAINER_ID)) {
             const countEl = document.getElementById('115master-count');
-            if (countEl) countEl.innerText = imageManifest.length;
+            if (countEl) countEl.innerText = manifestLen;
             return;
         }
         const anchor = document.querySelector('.master-preview-switch-btn') || document.querySelector('.button.btn-line');
@@ -64,13 +60,13 @@
             <style>
                 .master-btn { padding: 0 10px; height: 30px; line-height: 30px; border-radius: 4px; font-weight: bold; color: #fff; cursor: pointer; font-size: 12px; transition: all 0.2s; user-select: none; }
                 #btn-add { background: #2196f3; }
-                #btn-zip { background: #ff9800; }
+                #btn-zip { background: #4caf50; }
                 #btn-clear { background: #9e9e9e; }
                 .master-btn:hover { opacity: 0.8; }
                 .master-btn:active { transform: scale(0.95); }
-                .master-count-tag { background: #eee; color: #333; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-right: 5px; border: 1px solid #ddd; }
+                .master-count-tag { background: #fdfdfd; color: #333; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-right: 5px; border: 1px solid #ccc; }
             </style>
-            <span class="master-count-tag">清单共: <b id="115master-count">0</b> 张</span>
+            <span class="master-count-tag">清单: <b id="115master-count">0</b></span>
             <div id="btn-add" class="master-btn">加入清单</div>
             <div id="btn-zip" class="master-btn">打包下载</div>
             <div id="btn-clear" class="master-btn">清空</div>
@@ -80,13 +76,13 @@
         document.getElementById('btn-add').onclick = collectCurrentPage;
         document.getElementById('btn-zip').onclick = startManualZip;
         document.getElementById('btn-clear').onclick = () => {
-            imageManifest = [];
+            imageManifest = {};
             showToast('清单已清空', 'error');
         };
     }
 
-    // --- 3. 采集逻辑 (去掉了 alert) ---
-    async function getReadyData(blobUrl, name) {
+    // --- 3. 转换函数 ---
+    async function getReadyData(blobUrl) {
         try {
             const resp = await fetch(blobUrl);
             const rawBlob = await resp.blob();
@@ -102,7 +98,7 @@
                     ctx.drawImage(img, 0, 0);
                     canvas.toBlob(async b => {
                         const buffer = await b.arrayBuffer();
-                        resolve({ name, data: new Uint8Array(buffer) });
+                        resolve(new Uint8Array(buffer));
                     }, 'image/jpeg', 0.85);
                 };
                 img.src = URL.createObjectURL(rawBlob);
@@ -110,15 +106,18 @@
         } catch (e) { return null; }
     }
 
+    // --- 4. 采集逻辑 (增加重名检测) ---
     async function collectCurrentPage() {
         const listItems = Array.from(document.querySelectorAll('.list-contents li'));
         const btnAdd = document.getElementById('btn-add');
         const oldText = btnAdd.innerText;
-        
+
         btnAdd.innerText = "读取中...";
         btnAdd.style.pointerEvents = "none";
 
         let currentAdded = 0;
+        let duplicateNames = [];
+
         for (const li of listItems) {
             let imgSrc = null;
             const divs = li.querySelectorAll('div');
@@ -130,10 +129,18 @@
             }
 
             if (imgSrc) {
-                const title = (li.getAttribute('title') || li.getAttribute('n') || 'img').replace(/[\\/:*?"<>|]/g, '_');
-                const itemData = await getReadyData(imgSrc, `${title}_${imageManifest.length}.jpg`);
-                if (itemData) {
-                    imageManifest.push(itemData);
+                const rawTitle = li.getAttribute('title') || li.getAttribute('n') || 'img';
+                const finalName = rawTitle.replace(/[\\/:*?"<>|]/g, '_') + '.jpg';
+
+                // 检测是否重复
+                if (imageManifest[finalName]) {
+                    duplicateNames.push(finalName);
+                    continue;
+                }
+
+                const fileData = await getReadyData(imgSrc);
+                if (fileData) {
+                    imageManifest[finalName] = fileData;
                     currentAdded++;
                 }
             }
@@ -141,20 +148,27 @@
 
         btnAdd.innerText = oldText;
         btnAdd.style.pointerEvents = "";
-        document.getElementById('115master-count').innerText = imageManifest.length;
-        
-        // --- 修改点：改用 Toast 提示 ---
-        if (currentAdded > 0) {
+        document.getElementById('115master-count').innerText = Object.keys(imageManifest).length;
+
+        // 提醒逻辑
+        if (duplicateNames.length > 0) {
+            console.warn(`[115Master] 发现 ${duplicateNames.length} 个重名项:`, duplicateNames);
+            const msg = currentAdded > 0
+                ? `新加 ${currentAdded} 张，但有 ${duplicateNames.length} 个重名已跳过`
+                : `本页全部重名 (${duplicateNames.length}个)，未添加`;
+            showToast(msg, 'warn', 3000);
+        } else if (currentAdded > 0) {
             showToast(`成功添加 ${currentAdded} 张图片`);
         } else {
             showToast('未发现新图片', 'error');
         }
     }
 
-    // --- 4. 手动打包逻辑 (保持 UTF-8 支持) ---
+    // --- 5. 打包逻辑 ---
     async function startManualZip() {
-        if (imageManifest.length === 0) {
-            showToast('请先加入清单', 'error');
+        const manifestKeys = Object.keys(imageManifest);
+        if (manifestKeys.length === 0) {
+            showToast('清单是空的', 'error');
             return;
         }
         const btn = document.getElementById('btn-zip');
@@ -167,10 +181,9 @@
         const encoder = new TextEncoder();
 
         try {
-            for (let i = 0; i < imageManifest.length; i++) {
-                const file = imageManifest[i];
-                const fileNameBuf = encoder.encode(file.name);
-                const data = file.data;
+            for (const fileName of manifestKeys) {
+                const fileNameBuf = encoder.encode(fileName);
+                const data = imageManifest[fileName];
                 const size = data.length;
 
                 const lfh = new Uint8Array(30 + fileNameBuf.length);
@@ -205,11 +218,11 @@
             const finalBlob = new Blob([...zipParts, ...centralDirectory, eocd], {type: "application/zip"});
             const a = document.createElement('a');
             a.href = URL.createObjectURL(finalBlob);
-            a.download = `115_Pack_${Date.now()}.zip`;
+            a.download = `115_NativePack_${Date.now()}.zip`;
             a.click();
-            showToast('下载已开始！');
+            showToast('下载已开始');
         } catch (e) {
-            showToast('打包出错', 'error');
+            showToast('打包失败', 'error');
         } finally {
             btn.innerText = oldText;
         }
